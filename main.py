@@ -1,3 +1,7 @@
+import os
+# PARCHE DE COMPATIBILIDAD: Debe ir antes de cualquier otro import
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+
 import yfinance as yf
 import numpy as np
 import pandas as pd
@@ -6,123 +10,132 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, LSTM
 from transformers import pipeline
 import requests
-import os
 import random
 
-# --- CONFIGURACIÓN (SECRETS) ---
-# En la nube, estos valores se leerán de las variables de entorno para seguridad
-TOKEN = os.environ.get("8478600402:AAG30QRs6Bn6YH4EZeHrjDmIU_h5wKyYfKk")
-CHAT_ID = os.environ.get("7716811022")
+# --- CONFIGURACIÓN DE SEGURIDAD ---
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TICKER = "NVDA"
 
-# 1. FUNCIÓN: ENVIAR TELEGRAM
+# 1. FUNCIÓN: COMUNICACIÓN CON TELEGRAM (CON REPORTE DE ERRORES)
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
-    requests.post(url, json=payload)
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    response = requests.post(url, json=payload)
+    if response.status_code != 200:
+        print(f"❌ Error de API Telegram: {response.text}")
+    else:
+        print("✅ Mensaje entregado a Telegram.")
 
-# 2. FUNCIÓN: OBTENER DATOS Y ENTRENAR LSTM
+# 2. FUNCIÓN: CEREBRO NUMÉRICO (LSTM - DEEP LEARNING)
 def run_lstm_prediction():
-    print("⬇️ Descargando datos de mercado...")
+    print("⬇️ Descargando datos de Yahoo Finance...")
     data = yf.download(TICKER, period="2y", interval="1d")
     
-    # Limpieza rápida
+    # Limpieza de datos (Módulo I: Ciencia de Datos)
     if isinstance(data.columns, pd.MultiIndex):
         data = data['Close']
     else:
         data = data[['Close']]
     
-    # Precio actual (último cierre)
-    current_price = data.iloc[-1].item()
+    current_price = float(data.iloc[-1].iloc[0] if hasattr(data.iloc[-1], 'iloc') else data.iloc[-1])
     
-    # Preparamos datos para IA
+    # Normalización (Módulo III: Redes Neuronales)
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
     
     x_train, y_train = [], []
-    days = 60
+    prediction_days = 60
     
-    for x in range(days, len(scaled_data)):
-        x_train.append(scaled_data[x-days:x, 0])
+    for x in range(prediction_days, len(scaled_data)):
+        x_train.append(scaled_data[x-prediction_days:x, 0])
         y_train.append(scaled_data[x, 0])
         
     x_train, y_train = np.array(x_train), np.array(y_train)
     x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
     
-    # Creamos el modelo (Versión ligera para la nube)
-    print("🧠 Entrenando Red Neuronal...")
+    # Arquitectura de la Red (Deep Learning for Finance)
     model = Sequential()
     model.add(LSTM(units=50, return_sequences=False, input_shape=(x_train.shape[1], 1)))
     model.add(Dense(units=1))
     model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(x_train, y_train, epochs=10, batch_size=32, verbose=0) # Epochs bajas para velocidad
     
-    # Predecir mañana
-    last_60 = scaled_data[-days:]
-    X_test = np.array([last_60])
-    X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+    print("🏋️ Entrenando modelo de predicción...")
+    model.fit(x_train, y_train, epochs=12, batch_size=32, verbose=0)
     
-    pred_scaled = model.predict(X_test)
-    pred_price = scaler.inverse_transform(pred_scaled)[0][0]
+    # Predicción para el cierre de mañana
+    last_60 = scaled_data[-prediction_days:]
+    real_df = np.array([last_60])
+    real_df = np.reshape(real_df, (real_df.shape[0], real_df.shape[1], 1))
     
-    return current_price, pred_price
+    prediction = model.predict(real_df)
+    final_pred = scaler.inverse_transform(prediction)[0][0]
+    
+    return current_price, final_pred
 
-# 3. FUNCIÓN: ANÁLISIS DE NOTICIAS (ZERO-SHOT)
+# 3. FUNCIÓN: CEREBRO LÓGICO (NLP - ZERO-SHOT CLASSIFICATION)
 def analyze_sentiment():
-    print("📰 Leyendo noticias...")
-    # Simulamos titulares de hoy (En versión Pro usaríamos NewsAPI)
-    headlines_pool = [
-        "NVIDIA reveals new AI chip architecture with 3x performance.",
-        "Tech stocks slide as inflation data worries investors.",
-        "Analyst downgrades semiconductor sector due to supply chain issues.",
-        "NVIDIA partners with Tesla for autonomous driving.",
-        "Competitors like AMD are gaining market share in the GPU space."
+    print("🧠 Analizando contexto de noticias con BART...")
+    # Simulamos el flujo de noticias (Módulo III: Modelos Multi-modales)
+    news_samples = [
+        f"{TICKER} breaks revenue records driven by AI data center demand.",
+        "Regulatory pressure increases on semiconductor exports to Asia.",
+        f"Competitors are launching new chips to challenge {TICKER}'s dominance.",
+        "Investment firms upgrade price targets for AI sector."
     ]
-    # Seleccionamos 3 al azar para simular variedad diaria
-    todays_news = random.sample(headlines_pool, 3)
+    todays_news = random.sample(news_samples, 2)
     
+    # Clasificador de contexto (Corrige el error de FinBERT con competidores)
     classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
-    labels = ["Positive for NVIDIA", "Negative for NVIDIA"]
+    labels = [f"Positive for {TICKER}", f"Negative for {TICKER}"]
     
-    total_score = 0
-    for news in todays_news:
-        res = classifier(news, candidate_labels=labels)
-        if res['labels'][0] == "Positive for NVIDIA":
-            total_score += 1
+    score = 0
+    for text in todays_news:
+        res = classifier(text, candidate_labels=labels)
+        if res['labels'][0] == f"Positive for {TICKER}":
+            score += 1
         else:
-            total_score -= 1
+            score -= 1
             
-    return total_score, todays_news
+    return score, todays_news
 
-# --- EJECUCIÓN PRINCIPAL ---
+# --- FLUJO PRINCIPAL DE TOMA DE DECISIONES ---
 try:
-    print("🚀 Iniciando Bot Cuantitativo...")
-    price, prediction = run_lstm_prediction()
-    sentiment_score, news_list = analyze_sentiment()
+    print("🚀 Iniciando sistema cuantitativo...")
     
-    # Lógica de decisión
-    signal = "NEUTRAL 🟡"
-    if prediction > price and sentiment_score > 0:
-        signal = "COMPRA FUERTE 🟢"
-    elif prediction < price and sentiment_score < 0:
-        signal = "VENTA FUERTE 🔴"
+    curr_price, pred_price = run_lstm_prediction()
+    sentiment, headlines = analyze_sentiment()
     
-    # Mensaje para Telegram
-    msg = f"""
-🤖 **REPORTE DIARIO: {TICKER}** 🤖
+    # Lógica de Trading (Módulo I: Toma de decisiones)
+    # Definimos si la predicción es alcista o bajista
+    is_bullish_tech = pred_price > curr_price
     
-💵 Precio Actual: ${price:.2f}
-🔮 Predicción IA: ${prediction:.2f}
-    
-📰 Sentimiento Noticias: {sentiment_score}
-(Basado en {len(news_list)} titulares analizados)
-    
-🚦 **SEÑAL FINAL:** {signal}
+    status = "ESPERAR 🟡"
+    if is_bullish_tech and sentiment > 0:
+        status = "COMPRA FUERTE 🟢"
+    elif not is_bullish_tech and sentiment < 0:
+        status = "VENTA/ALERTA 🔴"
+    elif is_bullish_tech and sentiment <= 0:
+        status = "DIVERGENCIA (RIESGO ALTO) 🟠"
+
+    # Construcción del reporte para Telegram
+    reporte = f"""
+📈 **REPORTE CUANTITATIVO: {TICKER}**
+---
+💵 **Precio Actual:** ${curr_price:.2f}
+🔮 **Predicción IA (Mañana):** ${pred_price:.2f}
+📊 **Diferencia:** {((pred_price/curr_price)-1)*100:+.2f}%
+
+📰 **Sentimiento (NLP):** {sentiment}
+_{headlines[0]}_
+
+🚦 **ACCIÓN:** {status}
     """
     
-    send_telegram(msg)
-    print("✅ Reporte enviado con éxito.")
+    send_telegram(reporte)
+    print("✅ Proceso completado exitosamente.")
 
 except Exception as e:
-    print(f"❌ Error: {e}")
-    send_telegram(f"❌ El Bot colapsó: {e}")
+    error_msg = f"❌ **Falla en el Sistema:** {str(e)}"
+    print(error_msg)
+    send_telegram(error_msg)
