@@ -1,8 +1,8 @@
 yfinance
-numpy
 pandas
+numpy
 scikit-learn
-tensorflow
+tensorflow-cpu
 transformers
 requests
-torch
+torch --index-url https://download.pytorch.org/whl/cpu
