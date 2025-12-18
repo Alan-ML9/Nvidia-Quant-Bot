@@ -3,6 +3,7 @@ pandas
 numpy
 scikit-learn
 tensorflow-cpu
+tf-keras
 transformers
 requests
 torch --index-url https://download.pytorch.org/whl/cpu
