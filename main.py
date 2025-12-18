@@ -1,5 +1,5 @@
 import os
-# PARCHE DE COMPATIBILIDAD: Debe ir antes de cualquier otro import
+# PARCHE DE COMPATIBILIDAD
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import yfinance as yf
@@ -7,85 +7,118 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM
+from tensorflow.keras.layers import Dense, LSTM, Dropout
 from transformers import pipeline
 import requests
 import random
 
-# --- CONFIGURACIÓN DE SEGURIDAD ---
+# --- CONFIGURACIÓN ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TICKER = "NVDA"
 
-# 1. FUNCIÓN: COMUNICACIÓN CON TELEGRAM (CON REPORTE DE ERRORES)
+# 1. FUNCIÓN: CALCULADORA DE INDICADORES (Feature Engineering)
+def add_technical_indicators(df):
+    # Evitamos advertencias de pandas copiando el dataframe
+    df = df.copy()
+    
+    # A) RSI (Relative Strength Index)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # B) MACD (Moving Average Convergence Divergence)
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # Limpiamos los NaNs generados por los cálculos (los primeros días)
+    df = df.dropna()
+    return df
+
+# 2. FUNCIÓN: COMUNICACIÓN TELEGRAM
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    response = requests.post(url, json=payload)
-    if response.status_code != 200:
-        print(f"❌ Error de API Telegram: {response.text}")
-    else:
-        print("✅ Mensaje entregado a Telegram.")
+    requests.post(url, json=payload)
 
-# 2. FUNCIÓN: CEREBRO NUMÉRICO (LSTM - DEEP LEARNING)
+# 3. FUNCIÓN: CEREBRO MULTIVARIABLE (LSTM AVANZADA)
 def run_lstm_prediction():
-    print("⬇️ Descargando datos de Yahoo Finance...")
+    print(f"⬇️ Descargando datos de {TICKER}...")
+    # Descargamos más historia para que los indicadores se calculen bien
     data = yf.download(TICKER, period="2y", interval="1d")
     
-    # Limpieza de datos (Módulo I: Ciencia de Datos)
     if isinstance(data.columns, pd.MultiIndex):
         data = data['Close']
     else:
         data = data[['Close']]
+        
+    # Agregamos los "Lentes" (Indicadores)
+    data = add_technical_indicators(data)
     
-    current_price = float(data.iloc[-1].iloc[0] if hasattr(data.iloc[-1], 'iloc') else data.iloc[-1])
+    # Guardamos el precio actual para comparar después
+    current_price = float(data['Close'].iloc[-1])
     
-    # Normalización (Módulo III: Redes Neuronales)
+    # --- PREPROCESAMIENTO COMPLEJO ---
+    # Escalamos TODO (Precio, RSI, MACD, Signal)
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
+    scaled_data = scaler.fit_transform(data)
     
+    # Definimos X (Entradas) e y (Objetivo)
     x_train, y_train = [], []
     prediction_days = 60
     
+    # El objetivo ('y') es solo la columna 0 (Precio de Cierre)
     for x in range(prediction_days, len(scaled_data)):
-        x_train.append(scaled_data[x-prediction_days:x, 0])
-        y_train.append(scaled_data[x, 0])
+        x_train.append(scaled_data[x-prediction_days:x]) # Toma las 4 columnas
+        y_train.append(scaled_data[x, 0]) # Predice solo la columna 0 (Precio)
         
     x_train, y_train = np.array(x_train), np.array(y_train)
-    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
     
-    # Arquitectura de la Red (Deep Learning for Finance)
+    # --- ARQUITECTURA NEURONAL V2 ---
+    print(f"🧠 Entrenando IA con {x_train.shape[2]} variables (Precio + Indicadores)...")
     model = Sequential()
-    model.add(LSTM(units=50, return_sequences=False, input_shape=(x_train.shape[1], 1)))
-    model.add(Dense(units=1))
+    # input_shape ahora se adapta automáticamente a (60, 4)
+    model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], x_train.shape[2])))
+    model.add(Dropout(0.2)) # Evita memorización
+    model.add(LSTM(units=50, return_sequences=False))
+    model.add(Dropout(0.2))
+    model.add(Dense(units=1)) # Salida: 1 solo número (Precio)
+    
     model.compile(optimizer='adam', loss='mean_squared_error')
+    model.fit(x_train, y_train, epochs=15, batch_size=32, verbose=0)
     
-    print("🏋️ Entrenando modelo de predicción...")
-    model.fit(x_train, y_train, epochs=12, batch_size=32, verbose=0)
-    
-    # Predicción para el cierre de mañana
+    # --- PREDICCIÓN FUTURA ---
+    # Tomamos los últimos 60 días (con sus 4 indicadores)
     last_60 = scaled_data[-prediction_days:]
     real_df = np.array([last_60])
-    real_df = np.reshape(real_df, (real_df.shape[0], real_df.shape[1], 1))
     
-    prediction = model.predict(real_df)
-    final_pred = scaler.inverse_transform(prediction)[0][0]
+    pred_scaled = model.predict(real_df)
+    
+    # TRUCO MATEMÁTICO: Inversión de Escala
+    # El scaler espera 4 columnas para des-escalar, pero el modelo solo escupe 1 (precio).
+    # Creamos una matriz fantasma con ceros y ponemos la predicción en la columna 0.
+    dummy_matrix = np.zeros((1, scaled_data.shape[1]))
+    dummy_matrix[0, 0] = pred_scaled[0][0]
+    
+    final_pred = scaler.inverse_transform(dummy_matrix)[0][0]
     
     return current_price, final_pred
 
-# 3. FUNCIÓN: CEREBRO LÓGICO (NLP - ZERO-SHOT CLASSIFICATION)
+# 4. FUNCIÓN: ANÁLISIS DE SENTIMIENTO (ZERO-SHOT)
 def analyze_sentiment():
-    print("🧠 Analizando contexto de noticias con BART...")
-    # Simulamos el flujo de noticias (Módulo III: Modelos Multi-modales)
+    print("📰 Analizando noticias...")
     news_samples = [
-        f"{TICKER} breaks revenue records driven by AI data center demand.",
-        "Regulatory pressure increases on semiconductor exports to Asia.",
-        f"Competitors are launching new chips to challenge {TICKER}'s dominance.",
-        "Investment firms upgrade price targets for AI sector."
+        f"{TICKER} shares surge as AI demand continues to grow.",
+        "Market volatility increases ahead of Federal Reserve meeting.",
+        f"Analysts question {TICKER}'s valuation after recent rally.",
+        "New trade restrictions might impact semiconductor sector revenues."
     ]
     todays_news = random.sample(news_samples, 2)
     
-    # Clasificador de contexto (Corrige el error de FinBERT con competidores)
     classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
     labels = [f"Positive for {TICKER}", f"Negative for {TICKER}"]
     
@@ -99,43 +132,38 @@ def analyze_sentiment():
             
     return score, todays_news
 
-# --- FLUJO PRINCIPAL DE TOMA DE DECISIONES ---
+# --- EJECUCIÓN ---
 try:
-    print("🚀 Iniciando sistema cuantitativo...")
-    
+    print("🚀 Iniciando Bot V2.0 (Multivariable)...")
     curr_price, pred_price = run_lstm_prediction()
     sentiment, headlines = analyze_sentiment()
     
-    # Lógica de Trading (Módulo I: Toma de decisiones)
-    # Definimos si la predicción es alcista o bajista
-    is_bullish_tech = pred_price > curr_price
+    diff_percent = ((pred_price/curr_price)-1)*100
     
-    status = "ESPERAR 🟡"
-    if is_bullish_tech and sentiment > 0:
-        status = "COMPRA FUERTE 🟢"
-    elif not is_bullish_tech and sentiment < 0:
-        status = "VENTA/ALERTA 🔴"
-    elif is_bullish_tech and sentiment <= 0:
-        status = "DIVERGENCIA (RIESGO ALTO) 🟠"
-
-    # Construcción del reporte para Telegram
-    reporte = f"""
-📈 **REPORTE CUANTITATIVO: {TICKER}**
+    # Lógica de Decisión Mejorada
+    decision = "NEUTRAL 🟡"
+    if diff_percent > 1 and sentiment >= 0:
+        decision = "COMPRA (ALCISTA) 🟢"
+    elif diff_percent < -1 and sentiment <= 0:
+        decision = "VENTA (BAJISTA) 🔴"
+    
+    msg = f"""
+🤖 **BOT QUANT V2.0: {TICKER}**
+_Modelo Híbrido: LSTM + RSI + MACD_
 ---
-💵 **Precio Actual:** ${curr_price:.2f}
-🔮 **Predicción IA (Mañana):** ${pred_price:.2f}
-📊 **Diferencia:** {((pred_price/curr_price)-1)*100:+.2f}%
+💵 **Precio Hoy:** ${curr_price:.2f}
+🔮 **Predicción IA:** ${pred_price:.2f}
+📊 **Variación:** {diff_percent:+.2f}%
 
-📰 **Sentimiento (NLP):** {sentiment}
+📰 **Sentimiento:** {sentiment} pts
 _{headlines[0]}_
 
-🚦 **ACCIÓN:** {status}
+🚦 **ESTRATEGIA:** {decision}
     """
     
-    send_telegram(reporte)
-    print("✅ Proceso completado exitosamente.")
+    send_telegram(msg)
+    print("✅ Reporte V2 enviado.")
 
 except Exception as e:
-    error_msg = f"❌ **Falla en el Sistema:** {str(e)}"
-    print(error_msg)
-    send_telegram(error_msg)
+    print(f"❌ Error crítico: {e}")
+    send_telegram(f"❌ Bot V2 Falló: {e}")
