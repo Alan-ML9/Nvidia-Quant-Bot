@@ -1,5 +1,5 @@
 import os
-# PARCHE DE COMPATIBILIDAD
+# PARCHE DE COMPATIBILIDAD (Vital para la nube)
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import yfinance as yf
@@ -12,14 +12,13 @@ from transformers import pipeline
 import requests
 import random
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE SEGURIDAD ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TICKER = "NVDA"
 
-# 1. FUNCIÓN: CALCULADORA DE INDICADORES (Feature Engineering)
+# 1. FUNCIÓN: INGENIERÍA DE CARACTERÍSTICAS (INDICADORES TÉCNICOS)
 def add_technical_indicators(df):
-    # Evitamos advertencias de pandas copiando el dataframe
     df = df.copy()
     
     # A) RSI (Relative Strength Index)
@@ -35,75 +34,88 @@ def add_technical_indicators(df):
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # Limpiamos los NaNs generados por los cálculos (los primeros días)
-    df = df.dropna()
-    return df
+    # Limpiamos los datos vacíos generados por el cálculo
+    return df.dropna()
 
-# 2. FUNCIÓN: COMUNICACIÓN TELEGRAM
+# 2. FUNCIÓN: COMUNICACIÓN CON TELEGRAM
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
-# 3. FUNCIÓN: CEREBRO MULTIVARIABLE (LSTM AVANZADA)
+# 3. FUNCIÓN: CEREBRO MULTIVARIABLE (LSTM REPARADA)
 def run_lstm_prediction():
     print(f"⬇️ Descargando datos de {TICKER}...")
-    # Descargamos más historia para que los indicadores se calculen bien
-    data = yf.download(TICKER, period="2y", interval="1d")
+    # Descargamos datos crudos
+    raw_data = yf.download(TICKER, period="2y", interval="1d")
     
+    # --- BLOQUE DE LIMPIEZA DE DATOS (FIX ROBUSTO) ---
+    data = raw_data.copy()
+    
+    # Si Yahoo devuelve un índice múltiple (ej: Price -> Close -> NVDA), lo aplanamos
     if isinstance(data.columns, pd.MultiIndex):
-        data = data['Close']
-    else:
-        data = data[['Close']]
-        
-    # Agregamos los "Lentes" (Indicadores)
+        try:
+            # Intentamos obtener el nivel de 'Close', 'Open', etc.
+            data.columns = data.columns.get_level_values(0) 
+            # Si al aplanar quedan nombres raros, buscamos específicamente 'Close'
+            if 'Close' not in data.columns:
+                 # A veces el nivel correcto es el 1, probamos ese
+                 data = raw_data.copy()
+                 data.columns = data.columns.get_level_values(1)
+        except:
+            pass # Si falla, seguimos e intentamos buscar la columna manualmente
+            
+    # Último intento de seguridad: Renombrar si existe 'Adj Close' pero no 'Close'
+    if 'Close' not in data.columns and 'Adj Close' in data.columns:
+        data = data.rename(columns={'Adj Close': 'Close'})
+
+    # Nos aseguramos de tener solo las columnas necesarias y eliminamos el resto
+    # (El copy es importante para evitar advertencias de pandas)
+    data = data[['Close']].copy()
+    
+    # --- FIN DEL FIX ---
+
+    # Agregamos los Indicadores Técnicos
     data = add_technical_indicators(data)
     
-    # Guardamos el precio actual para comparar después
     current_price = float(data['Close'].iloc[-1])
     
-    # --- PREPROCESAMIENTO COMPLEJO ---
-    # Escalamos TODO (Precio, RSI, MACD, Signal)
+    # Escalamos las 4 variables (Precio, RSI, MACD, Signal)
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler.fit_transform(data)
     
-    # Definimos X (Entradas) e y (Objetivo)
     x_train, y_train = [], []
     prediction_days = 60
     
-    # El objetivo ('y') es solo la columna 0 (Precio de Cierre)
+    # Preparamos las secuencias
     for x in range(prediction_days, len(scaled_data)):
-        x_train.append(scaled_data[x-prediction_days:x]) # Toma las 4 columnas
-        y_train.append(scaled_data[x, 0]) # Predice solo la columna 0 (Precio)
+        x_train.append(scaled_data[x-prediction_days:x]) # Input: Las 4 variables
+        y_train.append(scaled_data[x, 0]) # Output: Solo Precio (Columna 0)
         
     x_train, y_train = np.array(x_train), np.array(y_train)
     
-    # --- ARQUITECTURA NEURONAL V2 ---
-    print(f"🧠 Entrenando IA con {x_train.shape[2]} variables (Precio + Indicadores)...")
+    print(f"🧠 Entrenando IA con {x_train.shape[2]} dimensiones...")
+    
+    # Arquitectura LSTM Multivariable
     model = Sequential()
-    # input_shape ahora se adapta automáticamente a (60, 4)
     model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], x_train.shape[2])))
-    model.add(Dropout(0.2)) # Evita memorización
+    model.add(Dropout(0.2))
     model.add(LSTM(units=50, return_sequences=False))
     model.add(Dropout(0.2))
-    model.add(Dense(units=1)) # Salida: 1 solo número (Precio)
+    model.add(Dense(units=1))
     
     model.compile(optimizer='adam', loss='mean_squared_error')
     model.fit(x_train, y_train, epochs=15, batch_size=32, verbose=0)
     
-    # --- PREDICCIÓN FUTURA ---
-    # Tomamos los últimos 60 días (con sus 4 indicadores)
+    # Predicción
     last_60 = scaled_data[-prediction_days:]
     real_df = np.array([last_60])
     
     pred_scaled = model.predict(real_df)
     
-    # TRUCO MATEMÁTICO: Inversión de Escala
-    # El scaler espera 4 columnas para des-escalar, pero el modelo solo escupe 1 (precio).
-    # Creamos una matriz fantasma con ceros y ponemos la predicción en la columna 0.
+    # Inversión de Escala (Truco para matriz de 4 columnas)
     dummy_matrix = np.zeros((1, scaled_data.shape[1]))
     dummy_matrix[0, 0] = pred_scaled[0][0]
-    
     final_pred = scaler.inverse_transform(dummy_matrix)[0][0]
     
     return current_price, final_pred
@@ -112,10 +124,10 @@ def run_lstm_prediction():
 def analyze_sentiment():
     print("📰 Analizando noticias...")
     news_samples = [
-        f"{TICKER} shares surge as AI demand continues to grow.",
-        "Market volatility increases ahead of Federal Reserve meeting.",
-        f"Analysts question {TICKER}'s valuation after recent rally.",
-        "New trade restrictions might impact semiconductor sector revenues."
+        f"{TICKER} reports record-breaking data center revenue.",
+        "Inflation concerns put pressure on high-growth tech stocks.",
+        f"Analysts debate {TICKER}'s valuation amidst AI rally.",
+        "Supply chain improvements boost semiconductor outlook."
     ]
     todays_news = random.sample(news_samples, 2)
     
@@ -132,24 +144,26 @@ def analyze_sentiment():
             
     return score, todays_news
 
-# --- EJECUCIÓN ---
+# --- EJECUCIÓN PRINCIPAL ---
 try:
-    print("🚀 Iniciando Bot V2.0 (Multivariable)...")
+    print("🚀 Iniciando Bot V2.1 (Multivariable Blindado)...")
     curr_price, pred_price = run_lstm_prediction()
     sentiment, headlines = analyze_sentiment()
     
     diff_percent = ((pred_price/curr_price)-1)*100
     
-    # Lógica de Decisión Mejorada
+    # Lógica de Decisión
     decision = "NEUTRAL 🟡"
     if diff_percent > 1 and sentiment >= 0:
         decision = "COMPRA (ALCISTA) 🟢"
     elif diff_percent < -1 and sentiment <= 0:
         decision = "VENTA (BAJISTA) 🔴"
+    elif diff_percent > 1 and sentiment < 0:
+        decision = "DIVERGENCIA (RIESGO) 🟠"
     
     msg = f"""
-🤖 **BOT QUANT V2.0: {TICKER}**
-_Modelo Híbrido: LSTM + RSI + MACD_
+🤖 **BOT QUANT V2.1: {TICKER}**
+_Modelo: LSTM + RSI + MACD + NLP_
 ---
 💵 **Precio Hoy:** ${curr_price:.2f}
 🔮 **Predicción IA:** ${pred_price:.2f}
@@ -162,8 +176,9 @@ _{headlines[0]}_
     """
     
     send_telegram(msg)
-    print("✅ Reporte V2 enviado.")
+    print("✅ Reporte enviado con éxito.")
 
 except Exception as e:
-    print(f"❌ Error crítico: {e}")
-    send_telegram(f"❌ Bot V2 Falló: {e}")
+    error_msg = f"❌ Falla Crítica en Bot: {str(e)}"
+    print(error_msg)
+    send_telegram(error_msg)
