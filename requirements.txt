@@ -1,4 +1,4 @@
-yfinance
+yfinance --upgrade
 pandas
 numpy
 scikit-learn
